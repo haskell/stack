@@ -41,6 +41,7 @@ sampleConfigNixDisabled :: String
 sampleConfigNixDisabled =
   "resolver: lts-19.22\n" ++
   "packages: ['.']\n" ++
+  "system-ghc: true\n" ++
   "nix:\n" ++
   "   enable: False"
 
