@@ -26,12 +26,10 @@ RUN curl -L https://github.com/commercialhaskell/stack/releases/download/v2.9.3/
 RUN chmod +x /usr/local/bin/stack
 
 ARG USERID
-ARG GROUPID
 
 RUN useradd --uid $USERID stack
 RUN mkdir -p /home/stack
 RUN chown -R stack /home/stack
-RUN usermod -aG $GROUPID stack
 
 USER stack
 WORKDIR /home/stack

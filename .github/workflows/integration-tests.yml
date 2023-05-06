@@ -37,6 +37,9 @@ jobs:
         - os: macos-latest
           release-args: ""
           cache-bust: "23"
+        - os: [self-hosted, macOS, ARM64]
+          release-args: "--allow-dirty"
+          cache-bust: "33"
     steps:
     - name: Clone project
       uses: actions/checkout@v3
@@ -45,7 +48,7 @@ jobs:
       uses: actions/cache@v3
       with:
         path: ~/.stack
-        key: ${{ runner.os }}-${{ hashFiles('stack.yaml') }}-${{ matrix.cache-bust }}
+        key: ${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('stack.yaml') }}-${{ matrix.cache-bust }}
     - name: Cache dependencies on Windows
       if: startsWith(runner.os, 'Windows')
       uses: actions/cache@v3
@@ -53,7 +56,7 @@ jobs:
         path: |
           ~\AppData\Roaming\stack
           ~\AppData\Local\Programs\stack
-        key: ${{ runner.os }}-${{ hashFiles('stack.yaml') }}-${{ matrix.cache-bust }}
+        key: ${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('stack.yaml') }}-${{ matrix.cache-bust }}
 
     - name: Install deps and run checks
       shell: bash
@@ -86,10 +89,26 @@ jobs:
         EOF
         fi
 
-        # In case GHCup hooks have been created, remove them
-        if [ -d $(stack path --stack-root)/hooks ]
-        then
-            rm -Rf $(stack path --stack-root)/hooks
+        if [[ "${{ runner.os }}" == "macOS" ]] && [[ "${{ runner.arch }}" == "ARM64" ]] ; then
+            export GHCUP_INSTALL_BASE_PREFIX="$GITHUB_WORKSPACE"
+            export GHCUP_BIN="$GHCUP_INSTALL_BASE_PREFIX/.ghcup/bin"
+            curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | BOOTSTRAP_HASKELL_MINIMAL=1 sh
+            source "$(dirname "${GHCUP_BIN}")/env"
+            ghcup install stack latest --force
+            rm -rf ~/.stack/hooks
+            bash .github/scripts/brew.sh git coreutils autoconf automake llvm@11
+            export PATH="$HOME/.brew/bin:$HOME/.brew/sbin:$HOME/.brew/opt/llvm@11/bin:$PATH"
+            export CC="$HOME/.brew/opt/llvm@11/bin/clang"
+            export CXX="$HOME/.brew/opt/llvm@11/bin/clang++"
+            export LD=ld
+            export AR="$HOME/.brew/opt/llvm@11/bin/llvm-ar"
+            export RANLIB="$HOME/.brew/opt/llvm@11/bin/llvm-ranlib"
+        else
+          # In case GHCup hooks have been created, remove them
+          if [ -d $(stack path --stack-root)/hooks ]
+          then
+              rm -Rf $(stack path --stack-root)/hooks
+          fi
         fi
 
         # Do this in the same step as installing deps to get relevant env var modifications
@@ -100,69 +119,23 @@ jobs:
     - name: Build bindist
       shell: bash
       run: |
+        if [[ "${{ runner.os }}" == "macOS" ]] && [[ "${{ runner.arch }}" == "ARM64" ]] ; then
+            export GHCUP_INSTALL_BASE_PREFIX="$GITHUB_WORKSPACE"
+            export GHCUP_BIN="$GHCUP_INSTALL_BASE_PREFIX/.ghcup/bin"
+            source "$(dirname "${GHCUP_BIN}")/env"
+            export PATH="$HOME/.brew/bin:$HOME/.brew/sbin:$HOME/.brew/opt/llvm@11/bin:$PATH"
+            export CC="$HOME/.brew/opt/llvm@11/bin/clang"
+            export CXX="$HOME/.brew/opt/llvm@11/bin/clang++"
+            export LD=ld
+            export AR="$HOME/.brew/opt/llvm@11/bin/llvm-ar"
+            export RANLIB="$HOME/.brew/opt/llvm@11/bin/llvm-ranlib"
+        fi
         stack etc/scripts/release.hs build ${{ matrix.release-args }}
 
     - name: Upload bindist
       uses: actions/upload-artifact@v3
       with:
-        name: ${{ runner.os }}
-        path: _release/stack-*
-
-  configuration:
-    name: Check for self-hosted runners
-    runs-on: ubuntu-latest
-    env:
-      CAN_SIGN: ${{ secrets.RELEASE_SIGNING_KEY != '' }}
-    outputs:
-      arm64-runner: ${{ steps.runners.outputs.arm64 }}
-      can-sign: ${{ env.CAN_SIGN }}
-      test-arm64: ${{ steps.runners.outputs.test-arm64 }}
-    steps:
-    - name: Check for hosted runners
-      id: runners
-      shell: bash
-      env:
-        SELF_HOSTED_RUNNERS: ${{ secrets.SELF_HOSTED_RUNNERS || (github.repository_owner == 'commercialhaskell' && 'arm64') }}
-      run: |
-        echo "::set-output name=runners::$SELF_HOSTED_RUNNERS"
-        if echo "$SELF_HOSTED_RUNNERS" | grep -q 'arm64'; then
-          echo "::set-output name=arm64::['self-hosted', 'linux', 'ARM64']"
-          echo ::set-output name=test-arm64::true
-        else
-          echo "::set-output name=arm64::'ubuntu-latest'"
-          echo ::set-output name=test-arm64::false
-        fi
-
-  linux-arm64:
-    name: Linux ARM64
-    runs-on: ${{ fromJSON(needs.configuration.outputs.arm64-runner) }}
-    needs: configuration
-    steps:
-    - name: Skipping ARM64
-      if: needs.configuration.outputs.test-arm64 == 'false'
-      shell: bash
-      run: |
-        echo '::notice title=ARM64 skipped::To build ARM64, a self-hosted runner needs to be configured and the SELF_HOSTED_RUNNERS secret must contain arm64'
-
-    - name: Clone project
-      if: needs.configuration.outputs.test-arm64 == 'true'
-      uses: actions/checkout@v3
-
-    - name: Build bindist
-      if: needs.configuration.outputs.test-arm64 == 'true'
-      shell: bash
-      run: |
-        set -ex
-        docker build . -f etc/dockerfiles/arm64.Dockerfile -t stack --build-arg USERID=$(id -u) --build-arg GROUPID=$(id -g)
-        rm -rf _release
-        mkdir -p _release
-        docker run --rm -v $(pwd):/src -w /src stack bash -c "/home/stack/release build"
-
-    - name: Upload bindist
-      if: needs.configuration.outputs.test-arm64 == 'true'
-      uses: actions/upload-artifact@v3
-      with:
-        name: Linux-ARM64
+        name: ${{ runner.os }}-${{ runner.arch }}
         path: _release/stack-*
 
   github-release:
@@ -170,45 +143,37 @@ jobs:
     permissions:
       contents: write
     needs:
-    - configuration
     - integration-tests
-    - linux-arm64
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
     - name: Download Linux artifact
       uses: actions/download-artifact@v3
       with:
-        name: Linux
+        name: Linux-X64
         path: _release
     - name: Download macOS artifact
       uses: actions/download-artifact@v3
       with:
-        name: macOS
+        name: macOS-X64
+        path: _release
+    - name: Download macOS artifact (arm64)
+      uses: actions/download-artifact@v3
+      with:
+        name: macOS-ARM64
         path: _release
     - name: Download Windows artifact
       uses: actions/download-artifact@v3
       with:
-        name: Windows
+        name: Windows-X64
         path: _release
-    - name: Download Linux-ARM64 artifact
-      if: needs.configuration.outputs.test-arm64 == 'true'
-      uses: actions/download-artifact@v3
-      with:
-        name: Linux-ARM64
-        path: _release
-    - name: Hash and sign assets
-      if: needs.configuration.outputs.can-sign == 'true'
+    - name: Hash assets
       shell: bash
-      env:
-        RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
       run: |
         set -e
-        echo "$RELEASE_SIGNING_KEY"|gpg --import
         cd _release
         for asset in *; do
           shasum -a 256 "$asset" >"$asset.sha256"
-          gpg --digest-algo=sha512 --detach-sig --armor -u 0x575159689BEFB442 "$asset"
         done
     - name: Create GitHub release (final)
       id: github_release_final
@@ -264,3 +229,4 @@ jobs:
         prerelease: true
         overwrite: true
         release_id: ${{ steps.github_release_rc.outputs.id }}
+
